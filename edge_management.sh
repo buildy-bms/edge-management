@@ -18,7 +18,7 @@ set -euo pipefail
 # ============================================
 # CONFIGURATION
 # ============================================
-readonly SCRIPT_VERSION="1.6.2"
+readonly SCRIPT_VERSION="1.6.4"
 readonly NETBIRD_API_URL="https://api.netbird.io/api/peers"
 readonly CACHE_DIR="/tmp/edge-management"
 readonly CACHE_FILE="$CACHE_DIR/peers_cache.json"
@@ -1047,7 +1047,7 @@ draw_peers_header() {
     local scroll_indicator=""
     if [[ "$TOTAL_PEERS" -gt "$VISIBLE_ROWS" ]]; then
         local end_pos=$((SCROLL_OFFSET + VISIBLE_ROWS))
-        [[ "$end_pos" -gt "$TOTAL_PEERS" ]] && end_pos=$TOTAL_PEERS
+        [[ "$end_pos" -gt "$TOTAL_PEERS" ]] && end_pos=$TOTAL_PEERS || true
         scroll_indicator="${DIM}[${SCROLL_OFFSET}+1-${end_pos}/${TOTAL_PEERS}]${NC}  ${CYAN}↑↓${NC}"
     fi
 
@@ -1061,7 +1061,7 @@ draw_peers_header() {
 draw_peers_list() {
     local start=$SCROLL_OFFSET
     local end=$((SCROLL_OFFSET + VISIBLE_ROWS))
-    [[ "$end" -gt "$TOTAL_PEERS" ]] && end=$TOTAL_PEERS
+    [[ "$end" -gt "$TOTAL_PEERS" ]] && end=$TOTAL_PEERS || true
 
     # Si pas de peers, afficher message et lignes vides
     if [[ "$TOTAL_PEERS" -eq 0 || "${#PEERS_ARRAY[@]}" -eq 0 ]]; then
@@ -1114,7 +1114,7 @@ draw_peers_list() {
 draw_menu() {
     local fav_count fav_indicator=""
     fav_count=$(get_favorites_count)
-    [[ "$fav_count" -gt 0 ]] && fav_indicator="(${fav_count})"
+    [[ "$fav_count" -gt 0 ]] && fav_indicator="(${fav_count})" || true
 
     echo -e "${BLUE}──────────────────────────────────────────────────────────────────────────────────────────────────────${NC}"
     echo -e "  ${GREEN}[N]${NC} menu  ${GREEN}[N]s${NC} ssh  ${GREEN}[N]l${NC} logs  ${GREEN}[N]i${NC} info  ${DIM}|${NC}  ${YELLOW}/${NC} search  ${YELLOW}a${NC} all/online  ${CYAN}↑↓${NC} scroll  ${YELLOW}f${NC} fav${fav_indicator}  ${YELLOW}r${NC} refresh  ${RED}q${NC} quit"
@@ -1126,8 +1126,11 @@ calculate_visible_rows() {
     term_rows=$(tput lines 2>/dev/null || echo 24)
     # Header: 3 lignes, Peers header: 3 lignes, Menu: 2 lignes, Prompt: 1 ligne, Marge: 2
     VISIBLE_ROWS=$((term_rows - 11))
-    [[ "$VISIBLE_ROWS" -lt 5 ]] && VISIBLE_ROWS=5
-    [[ "$VISIBLE_ROWS" -gt 30 ]] && VISIBLE_ROWS=30
+    if [[ "$VISIBLE_ROWS" -lt 5 ]]; then
+        VISIBLE_ROWS=5
+    elif [[ "$VISIBLE_ROWS" -gt 30 ]]; then
+        VISIBLE_ROWS=30
+    fi
 }
 
 # Lire une touche (gere les fleches)
@@ -2537,17 +2540,15 @@ main_menu() {
     local input_buffer=""
 
     while true; do
-        # Calculer les lignes visibles selon le terminal
         calculate_visible_rows
 
         if [[ "$need_full_redraw" == "true" ]]; then
             clear
+            tput cup 0 0  # Positionner en haut de l'ecran
 
-            # Charger les peers
             fetch_peers
             load_filtered_peers
 
-            # Dessiner l'ecran complet
             draw_header
             draw_peers_header
             draw_peers_list
@@ -2557,7 +2558,6 @@ main_menu() {
             need_full_redraw=false
         fi
 
-        # Lire une touche
         local key
         key=$(read_key)
 
@@ -2576,7 +2576,7 @@ main_menu() {
                 ;;
             DOWN)
                 local max_offset=$((TOTAL_PEERS - VISIBLE_ROWS))
-                [[ "$max_offset" -lt 0 ]] && max_offset=0
+                [[ "$max_offset" -lt 0 ]] && max_offset=0 || true
                 if [[ "$SCROLL_OFFSET" -lt "$max_offset" ]]; then
                     ((SCROLL_OFFSET++))
                     tput cup 6 0
