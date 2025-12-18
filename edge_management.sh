@@ -18,7 +18,7 @@ set -euo pipefail
 # ============================================
 # CONFIGURATION
 # ============================================
-readonly SCRIPT_VERSION="1.5.15"
+readonly SCRIPT_VERSION="1.5.16"
 readonly NETBIRD_API_URL="https://api.netbird.io/api/peers"
 readonly CACHE_DIR="/tmp/edge-management"
 readonly CACHE_FILE="$CACHE_DIR/peers_cache.json"
@@ -653,13 +653,13 @@ get_cache_age() {
 
     local cache_mtime cache_age_sec
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        cache_mtime=$(stat -f%m "$CACHE_FILE" 2>/dev/null)
+        cache_mtime=$(stat -f%m "$CACHE_FILE" 2>/dev/null) || cache_mtime=""
     else
-        cache_mtime=$(stat -c%Y "$CACHE_FILE" 2>/dev/null)
+        cache_mtime=$(stat -c%Y "$CACHE_FILE" 2>/dev/null) || cache_mtime=""
     fi
 
-    # Si stat a echoue ou retourne vide
-    if [[ -z "$cache_mtime" || "$cache_mtime" -eq 0 ]]; then
+    # Si stat a echoue ou retourne vide ou non numerique
+    if [[ -z "$cache_mtime" || ! "$cache_mtime" =~ ^[0-9]+$ ]]; then
         echo "inconnu"
         return
     fi
