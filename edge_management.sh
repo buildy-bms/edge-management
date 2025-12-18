@@ -18,7 +18,7 @@ set -euo pipefail
 # ============================================
 # CONFIGURATION
 # ============================================
-readonly SCRIPT_VERSION="1.5.22"
+readonly SCRIPT_VERSION="1.5.23"
 readonly NETBIRD_API_URL="https://api.netbird.io/api/peers"
 readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/buildy-bms/edge-management/main"
 readonly CACHE_DIR="/tmp/edge-management"
@@ -1528,11 +1528,7 @@ fetch_peer_logs() {
         for log_file in "${log_files[@]}"; do
             local log_date
             log_date=$(echo "$log_file" | sed 's/BACNET-//;s/\.log.*//')
-            local compressed=""
-            if [[ "$log_file" == *.gz ]]; then
-                compressed=" ${YELLOW}(compresse)${NC}"
-            fi
-            printf "  ${GREEN}%2d.${NC} %s%b\n" "$index" "$log_date" "$compressed"
+            printf "  ${GREEN}%2d.${NC} %s\n" "$index" "$log_date"
             ((index++))
         done
 
