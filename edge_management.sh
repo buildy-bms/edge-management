@@ -18,7 +18,7 @@ set -euo pipefail
 # ============================================
 # CONFIGURATION
 # ============================================
-readonly SCRIPT_VERSION="1.5.19"
+readonly SCRIPT_VERSION="1.5.20"
 readonly NETBIRD_API_URL="https://api.netbird.io/api/peers"
 readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/buildy-bms/edge-management/main"
 readonly CACHE_DIR="/tmp/edge-management"
@@ -1215,8 +1215,7 @@ echo '> Connexion SSH en cours...'
 echo ''
 
 # Connexion SSH interactive simple
-# TERM_PROGRAM= desactive les fonctionnalites Warp sur le serveur distant
-TERM_PROGRAM= ssh -t -o StrictHostKeyChecking=accept-new "$username@$peer_ip"
+ssh -t -o StrictHostKeyChecking=accept-new "$username@$peer_ip"
 
 echo ''
 echo '> Session terminee.'
@@ -1230,31 +1229,13 @@ SCRIPT_BODY
     log_message "${YELLOW}L'authentification NetBird se fera dans cette nouvelle fenetre.${NC}"
     echo ""
 
-    if [[ "$TERM_PROGRAM" == "WarpTerminal" ]] || pgrep -x "Warp" > /dev/null; then
-        # Warp : ouvrir avec open qui cree un nouveau tab/fenetre
-        osascript <<'EOF'
-tell application "Warp"
-    activate
-    delay 0.5
-end tell
-tell application "System Events"
-    tell process "Warp"
-        keystroke "t" using command down
-        delay 0.3
-        keystroke "bash /tmp/.edge_connect.sh"
-        keystroke return
-    end tell
-end tell
-EOF
-    else
-        # Terminal.app par defaut
-        osascript <<'EOF'
+    # Toujours utiliser Terminal.app pour SSH (evite les problemes d'integration Warp)
+    osascript <<'EOF'
 tell application "Terminal"
     activate
     do script "bash /tmp/.edge_connect.sh"
 end tell
 EOF
-    fi
 
     log_message "${GREEN}Fenetre ouverte.${NC}"
     log_message "Suivez les instructions dans la nouvelle fenetre."
