@@ -18,7 +18,7 @@ set -euo pipefail
 # ============================================
 # CONFIGURATION
 # ============================================
-readonly SCRIPT_VERSION="1.5.18"
+readonly SCRIPT_VERSION="1.5.19"
 readonly NETBIRD_API_URL="https://api.netbird.io/api/peers"
 readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/buildy-bms/edge-management/main"
 readonly CACHE_DIR="/tmp/edge-management"
@@ -1215,7 +1215,8 @@ echo '> Connexion SSH en cours...'
 echo ''
 
 # Connexion SSH interactive simple
-ssh -t -o StrictHostKeyChecking=accept-new "$username@$peer_ip"
+# TERM_PROGRAM= desactive les fonctionnalites Warp sur le serveur distant
+TERM_PROGRAM= ssh -t -o StrictHostKeyChecking=accept-new "$username@$peer_ip"
 
 echo ''
 echo '> Session terminee.'
