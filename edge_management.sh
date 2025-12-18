@@ -18,9 +18,8 @@ set -euo pipefail
 # ============================================
 # CONFIGURATION
 # ============================================
-readonly SCRIPT_VERSION="1.5.24"
+readonly SCRIPT_VERSION="1.6.1"
 readonly NETBIRD_API_URL="https://api.netbird.io/api/peers"
-readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/buildy-bms/edge-management/main"
 readonly CACHE_DIR="/tmp/edge-management"
 readonly CACHE_FILE="$CACHE_DIR/peers_cache.json"
 readonly LOG_CACHE_DIR="$CACHE_DIR/logs"
@@ -46,83 +45,8 @@ YELLOW=$'\033[0;33m'
 BLUE=$'\033[0;34m'
 MAGENTA=$'\033[0;35m'
 CYAN=$'\033[0;36m'
-WHITE=$'\033[1;37m'
+DIM=$'\033[2m'
 NC=$'\033[0m'
-
-# ============================================
-# AUTO-MISE A JOUR
-# ============================================
-
-check_for_updates() {
-    # Skip si --no-update passe en argument
-    [[ "${1:-}" == "--no-update" ]] && return 0
-
-    # Verifier la connectivite (timeout 2s)
-    if ! curl -s --connect-timeout 2 -o /dev/null "$GITHUB_RAW_URL/edge_management.sh"; then
-        return 0  # Pas de connexion, continuer sans mise a jour
-    fi
-
-    # Recuperer la version distante
-    local remote_version
-    remote_version=$(curl -s --connect-timeout 5 "$GITHUB_RAW_URL/edge_management.sh" 2>/dev/null | grep -E '^readonly SCRIPT_VERSION=' | cut -d'"' -f2)
-
-    if [[ -z "$remote_version" ]]; then
-        return 0  # Impossible de recuperer la version
-    fi
-
-    # Comparer les versions (simple comparaison de chaines)
-    if [[ "$remote_version" != "$SCRIPT_VERSION" ]]; then
-        # Verifier si la version distante est plus recente
-        local local_parts remote_parts
-        IFS='.' read -ra local_parts <<< "$SCRIPT_VERSION"
-        IFS='.' read -ra remote_parts <<< "$remote_version"
-
-        local is_newer=false
-        for i in 0 1 2; do
-            local lp="${local_parts[$i]:-0}"
-            local rp="${remote_parts[$i]:-0}"
-            if [[ "$rp" -gt "$lp" ]]; then
-                is_newer=true
-                break
-            elif [[ "$rp" -lt "$lp" ]]; then
-                break
-            fi
-        done
-
-        if [[ "$is_newer" == "true" ]]; then
-            echo ""
-            echo -e "${YELLOW}══════════════════════════════════════════════════════════════════════════${NC}"
-            echo -e "${YELLOW}  MISE A JOUR DISPONIBLE${NC}"
-            echo -e "${YELLOW}══════════════════════════════════════════════════════════════════════════${NC}"
-            echo -e "  Version actuelle : ${RED}$SCRIPT_VERSION${NC}"
-            echo -e "  Nouvelle version : ${GREEN}$remote_version${NC}"
-            echo ""
-            read -rp "  Mettre a jour maintenant ? (O/n) " update_choice
-
-            if [[ ! "$update_choice" =~ ^[nN]$ ]]; then
-                local script_path
-                script_path=$(realpath "$0")
-
-                echo -e "  ${CYAN}Telechargement...${NC}"
-                if curl -fsSL "$GITHUB_RAW_URL/edge_management.sh" -o "${script_path}.new"; then
-                    chmod +x "${script_path}.new"
-                    mv "${script_path}.new" "$script_path"
-                    echo -e "  ${GREEN}Mise a jour effectuee !${NC}"
-                    echo ""
-                    # Relancer le script avec --no-update pour eviter boucle infinie
-                    exec "$script_path" --no-update
-                else
-                    echo -e "  ${RED}Echec du telechargement${NC}"
-                    rm -f "${script_path}.new"
-                fi
-            fi
-            echo ""
-        fi
-    fi
-}
-
-# Verifier les mises a jour au demarrage
-check_for_updates "$@"
 
 # ============================================
 # CHARGEMENT DU TOKEN API NETBIRD
@@ -174,6 +98,47 @@ load_or_prompt_token() {
 
 NETBIRD_API_TOKEN=$(load_or_prompt_token)
 
+# Variables globales pour l'utilisateur courant
+CURRENT_USER_NAME=""
+CURRENT_USER_EMAIL=""
+CURRENT_USER_ROLE=""
+
+# Variables globales pour scroll et filtrage
+SCROLL_OFFSET=0
+FILTER_ONLINE_ONLY=true
+SEARCH_TERM=""
+PEERS_ARRAY=()       # Tableau des peers filtres
+TOTAL_PEERS=0        # Nombre total de peers filtres
+VISIBLE_ROWS=15      # Lignes visibles pour les peers (calcule dynamiquement)
+
+# Recuperer les infos de l'utilisateur courant via l'API
+fetch_current_user() {
+    local users_response
+    users_response=$(curl -s --connect-timeout 5 -X GET "https://api.netbird.io/api/users" \
+        -H "Authorization: Token $NETBIRD_API_TOKEN" \
+        -H "Content-Type: application/json" 2>/dev/null)
+
+    if [[ -z "$users_response" ]] || echo "$users_response" | grep -q '"code":401'; then
+        CURRENT_USER_NAME="Token invalide"
+        CURRENT_USER_EMAIL=""
+        CURRENT_USER_ROLE=""
+        return 1
+    fi
+
+    # Extraire l'utilisateur courant (is_current == true)
+    CURRENT_USER_NAME=$(echo "$users_response" | jq -r '.[] | select(.is_current == true) | .name' 2>/dev/null || echo "")
+    CURRENT_USER_EMAIL=$(echo "$users_response" | jq -r '.[] | select(.is_current == true) | .email' 2>/dev/null || echo "")
+    CURRENT_USER_ROLE=$(echo "$users_response" | jq -r '.[] | select(.is_current == true) | .role' 2>/dev/null || echo "")
+
+    if [[ -z "$CURRENT_USER_NAME" || "$CURRENT_USER_NAME" == "null" ]]; then
+        CURRENT_USER_NAME="Inconnu"
+        return 1
+    fi
+}
+
+# Charger les infos utilisateur au demarrage
+fetch_current_user
+
 # ============================================
 # FONCTIONS UTILITAIRES
 # ============================================
@@ -199,10 +164,11 @@ attendre_q() {
     done
 }
 
-# Lecture simple pour menus - validation avec Entree
+# Lecture pour menus - valide avec Entree
+# Gere: lettres simples, chiffres, combinaisons comme "12s"
 # Usage: result=$(read_menu_input)
 read_menu_input() {
-    local input
+    local input=""
     read -r input
     echo "$input"
 }
@@ -221,44 +187,42 @@ download_with_progress() {
     total_size=$(curl -sI --connect-timeout 3 "$url" 2>/dev/null | grep -i "^Content-Length:" | awk '{print $2}' | tr -d '\r\n' || echo "0")
     [ -z "$total_size" ] && total_size=0
 
-    # Indicateur en arriere-plan avec temps, taille et pourcentage
-    (
-        local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-        local i=0
-        while true; do
-            local elapsed=$(($(date +%s) - start_time))
-            local size_now=""
-            local percent_str=""
-            if [ -f "$temp_file" ]; then
-                local bytes=$(wc -c < "$temp_file" 2>/dev/null | tr -d ' ')
-                if [ "$bytes" -gt 1048576 ] 2>/dev/null; then
-                    size_now="$(awk "BEGIN {printf \"%.1f\", $bytes/1048576}") MB"
-                elif [ "$bytes" -gt 1024 ] 2>/dev/null; then
-                    size_now="$(awk "BEGIN {printf \"%.0f\", $bytes/1024}") KB"
-                elif [ "$bytes" -gt 0 ] 2>/dev/null; then
-                    size_now="${bytes} o"
-                fi
-                # Calculer pourcentage si on connait la taille totale
-                if [ "$total_size" -gt 0 ] 2>/dev/null && [ "$bytes" -gt 0 ] 2>/dev/null; then
-                    local pct=$(awk "BEGIN {printf \"%.0f\", ($bytes * 100) / $total_size}")
-                    [ "$pct" -gt 100 ] 2>/dev/null && pct=100
-                    percent_str=" (${pct}%)"
-                fi
+    # Telecharger en arriere-plan
+    curl -s --connect-timeout "$timeout" "$url" -o "$temp_file" 2>/dev/null &
+    local curl_pid=$!
+
+    # Afficher progression
+    local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local i=0
+
+    while kill -0 $curl_pid 2>/dev/null; do
+        local elapsed=$(($(date +%s) - start_time))
+        local size_now=""
+        local percent_str=""
+        if [ -f "$temp_file" ]; then
+            local bytes=$(wc -c < "$temp_file" 2>/dev/null | tr -d ' ')
+            if [ "$bytes" -gt 1048576 ] 2>/dev/null; then
+                size_now="$(awk "BEGIN {printf \"%.1f\", $bytes/1048576}") MB"
+            elif [ "$bytes" -gt 1024 ] 2>/dev/null; then
+                size_now="$(awk "BEGIN {printf \"%.0f\", $bytes/1024}") KB"
+            elif [ "$bytes" -gt 0 ] 2>/dev/null; then
+                size_now="${bytes} o"
             fi
-            printf "\r  ${CYAN}${chars:$i:1}${NC} Telechargement... ${YELLOW}%ds${NC} ${CYAN}%s${NC}${GREEN}%s${NC}        " "$elapsed" "$size_now" "$percent_str" >&2
-            i=$(( (i + 1) % ${#chars} ))
-            sleep 0.3
-        done
-    ) &
-    local spinner_pid=$!
+            # Calculer pourcentage si on connait la taille totale
+            if [ "$total_size" -gt 0 ] 2>/dev/null && [ "$bytes" -gt 0 ] 2>/dev/null; then
+                local pct=$(awk "BEGIN {printf \"%.0f\", ($bytes * 100) / $total_size}")
+                [ "$pct" -gt 100 ] 2>/dev/null && pct=100
+                percent_str=" (${pct}%)"
+            fi
+        fi
+        printf "\r  ${CYAN}${chars:$i:1}${NC} Telechargement... ${YELLOW}%ds${NC} ${CYAN}%s${NC}${GREEN}%s${NC}        " "$elapsed" "$size_now" "$percent_str" >&2
+        i=$(( (i + 1) % ${#chars} ))
+        sleep 0.2
+    done
 
-    # Telecharger silencieusement
-    curl -s --connect-timeout "$timeout" "$url" -o "$temp_file" 2>/dev/null
+    # Attendre la fin du processus curl
+    wait $curl_pid 2>/dev/null || true
     local curl_status=$?
-
-    # Arreter le spinner (|| true pour eviter erreur avec set -e)
-    kill $spinner_pid 2>/dev/null || true
-    wait $spinner_pid 2>/dev/null || true
 
     if [ $curl_status -eq 0 ] && [ -f "$temp_file" ] && [ -s "$temp_file" ]; then
         local actual_size=$(wc -c < "$temp_file" | tr -d ' ')
@@ -272,10 +236,10 @@ download_with_progress() {
         fi
         local line_count=$(wc -l < "$temp_file" | tr -d ' ')
         local elapsed=$(($(date +%s) - start_time))
-        echo -e "\r  ${GREEN}✓${NC} Telecharge : ${CYAN}$size_display${NC} (${line_count} lignes) en ${YELLOW}${elapsed}s${NC}        " >&2
+        echo -e "\r  ${GREEN}✓${NC} Telecharge : ${CYAN}$size_display${NC} (${line_count} lignes) en ${YELLOW}${elapsed}s${NC}                    " >&2
         cat "$temp_file"
     else
-        echo -e "\r  ${RED}✗${NC} Echec du telechargement                              " >&2
+        echo -e "\r  ${RED}✗${NC} Echec du telechargement                                          " >&2
     fi
 
     rm -f "$temp_file"
@@ -695,13 +659,10 @@ get_cache_age() {
     fi
 
     local cache_mtime cache_age_sec
-    # Detecter GNU stat vs BSD stat (GNU supporte --version)
-    if stat --version &>/dev/null; then
-        # GNU stat (Linux ou macOS avec coreutils)
-        cache_mtime=$(stat -c%Y "$CACHE_FILE" 2>/dev/null) || cache_mtime=""
-    else
-        # BSD stat (macOS natif)
+    if [[ "$OSTYPE" == "darwin"* ]]; then
         cache_mtime=$(stat -f%m "$CACHE_FILE" 2>/dev/null) || cache_mtime=""
+    else
+        cache_mtime=$(stat -c%Y "$CACHE_FILE" 2>/dev/null) || cache_mtime=""
     fi
 
     # Si stat a echoue ou retourne vide ou non numerique
@@ -1007,67 +968,130 @@ fetch_peers() {
     log_message "${GREEN}$count peers recuperes.${NC}"
 }
 
-display_peers_list() {
+# Tableau global des peers filtres (pour mapping index -> peer)
+FILTERED_PEERS_JSON=""
+
+# Charger et filtrer les peers dans le tableau global
+load_filtered_peers() {
     if [ ! -f "$CACHE_FILE" ]; then
-        log_message "${RED}Aucun cache disponible. Lancez d'abord une recuperation.${NC}"
-        return 1
+        PEERS_ARRAY=()
+        TOTAL_PEERS=0
+        return 0  # Ne pas retourner d'erreur pour eviter crash avec set -e
     fi
 
     # Recuperer les routes pour les IPs LAN (silencieux)
     fetch_routes_silent
 
-    # Compter les peers et recuperer l'age du cache
-    local peer_count cache_age cache_warning=""
-    peer_count=$(jq 'length' "$CACHE_FILE" 2>/dev/null || echo "0")
-    cache_age=$(get_cache_age)
+    # Construire le filtre jq selon les options
+    local jq_filter='sort_by(.name // .hostname | ascii_downcase)'
 
-    # Avertissement si cache > 4 min
-    local cache_mtime cache_age_sec=0
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        cache_mtime=$(stat -f%m "$CACHE_FILE" 2>/dev/null) || cache_mtime=""
-    else
-        cache_mtime=$(stat -c%Y "$CACHE_FILE" 2>/dev/null) || cache_mtime=""
-    fi
-    if [[ -n "$cache_mtime" && "$cache_mtime" =~ ^[0-9]+$ && "$cache_mtime" -gt 0 ]]; then
-        cache_age_sec=$(($(date +%s) - cache_mtime))
-    fi
-    if [[ "$cache_age_sec" -gt 240 ]]; then
-        cache_warning=" ${RED}(obsolete)${NC}"
+    if [[ "$FILTER_ONLINE_ONLY" == "true" ]]; then
+        jq_filter="[.[] | select(.connected == true)] | $jq_filter"
     fi
 
-    echo ""
-    echo -e "${YELLOW}════════════════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
-    echo -e "${YELLOW}                         PEERS NETBIRD DISPONIBLES${NC} ${CYAN}(${peer_count} peers - maj il y a ${cache_age})${NC}${cache_warning}"
-    echo -e "${YELLOW}════════════════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
-    echo ""
+    if [[ -n "$SEARCH_TERM" ]]; then
+        local search_lower=$(echo "$SEARCH_TERM" | tr '[:upper:]' '[:lower:]')
+        jq_filter="[.[] | select((.name // .hostname | ascii_downcase) | contains(\"$search_lower\"))] | $jq_filter"
+    fi
 
-    # En-tete du tableau
-    printf "${CYAN}  #  ${NC}| ${CYAN}%-25s${NC} | ${CYAN}%-15s${NC} | ${CYAN}%-18s${NC} | ${CYAN}%-20s${NC} | ${CYAN}SSH${NC}\n" \
-        "Nom" "IP NetBird" "Reseau LAN" "OS"
-    echo "-----+---------------------------+-----------------+--------------------+----------------------+-----"
+    FILTERED_PEERS_JSON=$(jq -c "$jq_filter" "$CACHE_FILE" 2>/dev/null)
+    TOTAL_PEERS=$(echo "$FILTERED_PEERS_JSON" | jq 'length' 2>/dev/null || echo "0")
 
-    local index=1
-    # Tri alphabetique par nom (ou hostname si name vide)
+    # Remplir le tableau
+    PEERS_ARRAY=()
     while IFS= read -r peer; do
-        local id name hostname ip os ssh_enabled connected lan_network
+        [[ -n "$peer" && "$peer" != "null" ]] && PEERS_ARRAY+=("$peer")
+    done < <(echo "$FILTERED_PEERS_JSON" | jq -c '.[]')
+}
+
+# Afficher le header fixe (3 lignes)
+draw_header() {
+    local netbird_status
+    netbird_status=$(get_netbird_status_compact)
+
+    local user_display=""
+    if [[ -n "$CURRENT_USER_NAME" && "$CURRENT_USER_NAME" != "Inconnu" && "$CURRENT_USER_NAME" != "Token invalide" ]]; then
+        local role_color=""
+        case "$CURRENT_USER_ROLE" in
+            owner) role_color="${MAGENTA}" ;;
+            admin|network_admin) role_color="${CYAN}" ;;
+            *) role_color="${DIM}" ;;
+        esac
+        user_display="${GREEN}$CURRENT_USER_NAME${NC} ${role_color}($CURRENT_USER_ROLE)${NC}"
+    elif [[ "$CURRENT_USER_NAME" == "Token invalide" ]]; then
+        user_display="${RED}Token invalide${NC}"
+    fi
+
+    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
+    echo -e "  ${YELLOW}EDGE MANAGEMENT${NC} v${SCRIPT_VERSION}    $user_display    NetBird: $netbird_status"
+    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
+}
+
+# Afficher le tableau header des peers (2 lignes)
+draw_peers_header() {
+    local total_count online_count
+    total_count=$(jq 'length' "$CACHE_FILE" 2>/dev/null || echo "0")
+    online_count=$(jq '[.[] | select(.connected == true)] | length' "$CACHE_FILE" 2>/dev/null || echo "0")
+
+    # Indicateur de filtre
+    local filter_indicator=""
+    if [[ -n "$SEARCH_TERM" ]]; then
+        filter_indicator="${MAGENTA}[recherche: $SEARCH_TERM]${NC}"
+    elif [[ "$FILTER_ONLINE_ONLY" == "true" ]]; then
+        filter_indicator="${GREEN}[online]${NC}"
+    else
+        filter_indicator="${DIM}[tous]${NC}"
+    fi
+
+    # Indicateur de scroll
+    local scroll_indicator=""
+    if [[ "$TOTAL_PEERS" -gt "$VISIBLE_ROWS" ]]; then
+        local end_pos=$((SCROLL_OFFSET + VISIBLE_ROWS))
+        [[ "$end_pos" -gt "$TOTAL_PEERS" ]] && end_pos=$TOTAL_PEERS
+        scroll_indicator="${DIM}[${SCROLL_OFFSET}+1-${end_pos}/${TOTAL_PEERS}]${NC}  ${CYAN}↑↓${NC}"
+    fi
+
+    echo -e "  ${YELLOW}PEERS${NC} (${GREEN}${online_count} online${NC} / ${total_count} total)    ${scroll_indicator}    ${filter_indicator}"
+    printf "${CYAN}  #  ${NC}| ${CYAN}%-25s${NC} | ${CYAN}%-15s${NC} | ${CYAN}%-18s${NC} | ${CYAN}%-20s${NC}\n" \
+        "Nom" "IP NetBird" "Reseau LAN" "OS"
+    echo -e "${BLUE}-----+---------------------------+-----------------+--------------------+----------------------${NC}"
+}
+
+# Afficher les peers visibles (zone scrollable)
+draw_peers_list() {
+    local start=$SCROLL_OFFSET
+    local end=$((SCROLL_OFFSET + VISIBLE_ROWS))
+    [[ "$end" -gt "$TOTAL_PEERS" ]] && end=$TOTAL_PEERS
+
+    # Si pas de peers, afficher message et lignes vides
+    if [[ "$TOTAL_PEERS" -eq 0 || "${#PEERS_ARRAY[@]}" -eq 0 ]]; then
+        echo -e "  ${DIM}Aucun peer trouve.${NC}"
+        for ((j = 1; j < VISIBLE_ROWS; j++)); do
+            echo ""
+        done
+        return
+    fi
+
+    for ((i = start; i < end; i++)); do
+        local peer="${PEERS_ARRAY[$i]:-}"
+        [[ -z "$peer" ]] && continue
+
+        local display_index=$((i + 1))
+        local id name hostname ip os connected lan_network
         id=$(echo "$peer" | jq -r '.id // ""')
         name=$(echo "$peer" | jq -r '.name // ""')
         hostname=$(echo "$peer" | jq -r '.hostname // ""')
         ip=$(echo "$peer" | jq -r '.ip // "N/A"')
         os=$(echo "$peer" | jq -r '.os // "N/A"' | cut -c1-20)
-        ssh_enabled=$(echo "$peer" | jq -r '.ssh_enabled // false')
         connected=$(echo "$peer" | jq -r '.connected // false')
 
-        # Recuperer le reseau LAN depuis les routes
         lan_network=$(get_lan_network_for_peer "$id")
         lan_network="${lan_network:-N/A}"
         lan_network="${lan_network:0:18}"
 
-        # Utiliser name ou hostname
         local display_name="${name:-$hostname}"
         display_name="${display_name:0:25}"
 
-        # Couleur et symbole selon connexion
         local status_color="${RED}"
         local status_symbol="✗"
         if [ "$connected" = "true" ]; then
@@ -1075,28 +1099,66 @@ display_peers_list() {
             status_symbol="✓"
         fi
 
-        # SSH status
-        local ssh_status="${RED}Non${NC}"
-        if [ "$ssh_enabled" = "true" ]; then
-            ssh_status="${GREEN}Oui${NC}"
-        fi
+        printf "${status_color}%s %2d${NC} | %-25s | %-15s | %-18s | %-20s\n" \
+            "$status_symbol" "$display_index" "$display_name" "$ip" "$lan_network" "$os"
+    done
 
-        # Format: "✓  1" ou "✗ 12" - symbole + index aligne a droite sur 3 chars
-        printf "${status_color}%s %2d${NC} | %-25s | %-15s | %-18s | %-20s | %b\n" \
-            "$status_symbol" "$index" "$display_name" "$ip" "$lan_network" "$os" "$ssh_status"
+    # Remplir les lignes vides si moins de peers que VISIBLE_ROWS
+    local displayed=$((end - start))
+    for ((j = displayed; j < VISIBLE_ROWS; j++)); do
+        echo ""
+    done
+}
 
-        ((index++))
-    done < <(jq -c 'sort_by(.name // .hostname | ascii_downcase) | .[]' "$CACHE_FILE")
+# Afficher le menu fixe (2 lignes)
+draw_menu() {
+    local fav_count fav_indicator=""
+    fav_count=$(get_favorites_count)
+    [[ "$fav_count" -gt 0 ]] && fav_indicator="(${fav_count})"
 
-    echo ""
-    echo -e "${CYAN}Legende :${NC} ${GREEN}✓${NC} Connecte | ${RED}✗${NC} Deconnecte"
-    echo ""
+    echo -e "${BLUE}──────────────────────────────────────────────────────────────────────────────────────────────────────${NC}"
+    echo -e "  ${GREEN}[N]${NC} menu  ${GREEN}[N]s${NC} ssh  ${GREEN}[N]l${NC} logs  ${GREEN}[N]i${NC} info  ${DIM}|${NC}  ${YELLOW}/${NC} search  ${YELLOW}a${NC} all/online  ${CYAN}↑↓${NC} scroll  ${YELLOW}f${NC} fav${fav_indicator}  ${YELLOW}r${NC} refresh  ${RED}q${NC} quit"
+}
+
+# Calculer le nombre de lignes visibles selon la taille du terminal
+calculate_visible_rows() {
+    local term_rows
+    term_rows=$(tput lines 2>/dev/null || echo 24)
+    # Header: 3 lignes, Peers header: 3 lignes, Menu: 2 lignes, Prompt: 1 ligne, Marge: 2
+    VISIBLE_ROWS=$((term_rows - 11))
+    [[ "$VISIBLE_ROWS" -lt 5 ]] && VISIBLE_ROWS=5
+    [[ "$VISIBLE_ROWS" -gt 30 ]] && VISIBLE_ROWS=30
+}
+
+# Lire une touche (gere les fleches)
+read_key() {
+    local key
+    IFS= read -rsn1 key
+
+    # Detecter sequence d'echappement (fleches)
+    if [[ "$key" == $'\e' ]]; then
+        read -rsn2 -t 0.1 key2
+        case "$key2" in
+            '[A') echo "UP" ;;
+            '[B') echo "DOWN" ;;
+            '[C') echo "RIGHT" ;;
+            '[D') echo "LEFT" ;;
+            *) echo "ESC" ;;
+        esac
+    else
+        echo "$key"
+    fi
 }
 
 get_peer_by_index() {
-    local index=$1
-    # Meme tri que display_peers_list pour correspondance des numeros
-    jq -c "sort_by(.name // .hostname | ascii_downcase) | .[$((index - 1))]" "$CACHE_FILE" 2>/dev/null
+    local display_index=$1
+    local actual_index=$((display_index - 1))
+
+    if [[ "$actual_index" -ge 0 && "$actual_index" -lt "$TOTAL_PEERS" ]]; then
+        echo "${PEERS_ARRAY[$actual_index]}"
+    else
+        echo ""
+    fi
 }
 
 # ============================================
@@ -1176,7 +1238,95 @@ select_ssh_user() {
 }
 
 
-show_ssh_commands() {
+execute_remote_update() {
+    local peer_ip="$1"
+    local username="$2"
+    local peer_name="$3"
+
+    echo ""
+    echo -e "${YELLOW}===============================================================================${NC}"
+    echo -e "${GREEN}Connexion a ${YELLOW}$peer_name${GREEN} ($peer_ip) en tant que ${YELLOW}$username${NC}"
+    echo -e "${YELLOW}===============================================================================${NC}"
+    echo ""
+
+    # Script temporaire pour la connexion SSH interactive
+    # NetBird JWT ne permet pas d'automatiser - chaque connexion requiert une auth
+    local tmp_script="/tmp/.edge_connect.sh"
+
+    # Commande a executer - separee en etapes pour eviter les problemes stdin
+    local update_cmd='cd /media/.edge/edge-scripts 2>/dev/null || cd ~/edge-scripts; git pull; bash update_edge_gateway.sh'
+
+    # Copier la commande dans le presse-papiers macOS
+    echo -n "$update_cmd" | pbcopy
+
+    cat > "$tmp_script" << SCRIPT_BODY
+#!/bin/bash
+clear
+echo '╔═══════════════════════════════════════════════════════════════╗'
+echo '║  CONNEXION SSH - $peer_name'
+echo '╚═══════════════════════════════════════════════════════════════╝'
+echo ''
+echo -e '\033[1;33m┌─────────────────────────────────────────────────────────────────┐\033[0m'
+echo -e '\033[1;33m│  1. Cliquez sur le lien d authentification NetBird             │\033[0m'
+echo -e '\033[1;33m│  2. Une fois connecte, collez avec Cmd+V                       │\033[0m'
+echo -e '\033[1;33m└─────────────────────────────────────────────────────────────────┘\033[0m'
+echo ''
+echo -e '\033[1;32m✓ Commande copiee dans le presse-papiers !\033[0m'
+echo ''
+echo -e '\033[0;90m$update_cmd\033[0m'
+echo ''
+echo '═════════════════════════════════════════════════════════════════'
+echo ''
+echo '> Connexion SSH en cours...'
+echo ''
+
+# Connexion SSH interactive simple
+ssh -t -o StrictHostKeyChecking=accept-new "$username@$peer_ip"
+
+echo ''
+echo '> Session terminee.'
+echo ''
+attendre_q "Appuyez sur 'q' pour fermer..."
+SCRIPT_BODY
+    chmod +x "$tmp_script"
+
+    # Detecter le terminal et ouvrir une nouvelle fenetre
+    log_message "Ouverture d'une nouvelle fenetre pour la connexion SSH..."
+    log_message "${YELLOW}L'authentification NetBird se fera dans cette nouvelle fenetre.${NC}"
+    echo ""
+
+    if [[ "$TERM_PROGRAM" == "WarpTerminal" ]] || pgrep -x "Warp" > /dev/null; then
+        # Warp : ouvrir avec open qui cree un nouveau tab/fenetre
+        osascript <<'EOF'
+tell application "Warp"
+    activate
+    delay 0.5
+end tell
+tell application "System Events"
+    tell process "Warp"
+        keystroke "t" using command down
+        delay 0.3
+        keystroke "bash /tmp/.edge_connect.sh"
+        keystroke return
+    end tell
+end tell
+EOF
+    else
+        # Terminal.app par defaut
+        osascript <<'EOF'
+tell application "Terminal"
+    activate
+    do script "bash /tmp/.edge_connect.sh"
+end tell
+EOF
+    fi
+
+    log_message "${GREEN}Fenetre ouverte.${NC}"
+    log_message "Suivez les instructions dans la nouvelle fenetre."
+    return 0
+}
+
+ssh_connect_with_fallback() {
     local peer_json="$1"
     local peer_ip
     peer_ip=$(echo "$peer_json" | jq -r '.ip')
@@ -1187,37 +1337,39 @@ show_ssh_commands() {
     local selected_user
     selected_user=$(select_ssh_user "$peer_json")
 
-    # Commandes
-    local ssh_cmd="ssh $selected_user@$peer_ip"
-    local update_cmd='cd /media/.edge/edge-scripts 2>/dev/null || cd ~/edge-scripts; git pull; bash update_edge_gateway.sh'
-
-    # Copier la commande SSH dans le presse-papiers
-    echo -n "$ssh_cmd" | pbcopy
-
     echo ""
-    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}  CONNEXION SSH - ${CYAN}$peer_name${NC}"
-    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    echo -e "${WHITE}1. Ouvrez un nouvel onglet et collez cette commande (deja copiee) :${NC}"
-    echo ""
-    echo -e "   ${GREEN}$ssh_cmd${NC}"
-    echo ""
-    echo -e "${WHITE}2. Une fois connecte, executez :${NC}"
-    echo ""
-    echo -e "   ${CYAN}$update_cmd${NC}"
-    echo ""
-    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}✓ Commande SSH copiee dans le presse-papiers !${NC}"
+    log_message "Connexion a ${CYAN}$peer_name${NC} (${peer_ip}) avec l'utilisateur ${GREEN}$selected_user${NC}..."
+    log_message "${YELLOW}Si une authentification NetBird est demandee, connectez-vous dans le navigateur.${NC}"
     echo ""
 
-    read -rp "Appuyez sur Entree pour continuer..."
-    return 0
-}
+    # Connexion directe - l'utilisateur verra les prompts d'authentification
+    if execute_remote_update "$peer_ip" "$selected_user" "$peer_name"; then
+        return 0
+    fi
 
-# Alias pour compatibilite
-ssh_connect_with_fallback() {
-    show_ssh_commands "$1"
+    log_message "${RED}Echec de connexion avec $selected_user${NC}"
+
+    # Fallback : essayer l'autre utilisateur
+    local fallback_user
+    if [ "$selected_user" = "$SSH_USER_DEBIAN_12" ]; then
+        fallback_user="$SSH_USER_DEBIAN_11"
+    else
+        fallback_user="$SSH_USER_DEBIAN_12"
+    fi
+
+    echo ""
+    if confirm_action "Essayer avec l'utilisateur $fallback_user ?"; then
+        log_message "Tentative avec ${YELLOW}$fallback_user${NC}..."
+
+        if execute_remote_update "$peer_ip" "$fallback_user" "$peer_name"; then
+            return 0
+        fi
+
+        log_message "${RED}Echec avec $fallback_user egalement.${NC}"
+    fi
+
+    log_message "${RED}Impossible de se connecter a $peer_name${NC}"
+    return 1
 }
 
 # ============================================
@@ -1351,6 +1503,23 @@ display_local_netbird_status() {
                 echo -e "          $ip_line"
             fi
         fi
+    fi
+}
+
+# Retourne le statut Netbird compact (ex: "Connected" ou "Disconnected")
+get_netbird_status_compact() {
+    if command -v netbird &>/dev/null; then
+        local status
+        status=$(netbird status 2>/dev/null | grep "Status:" | awk '{print $2}' || echo "")
+        if [[ "$status" == "Connected" ]]; then
+            echo "${GREEN}Connected${NC}"
+        elif [[ -n "$status" ]]; then
+            echo "${RED}$status${NC}"
+        else
+            echo "${DIM}N/A${NC}"
+        fi
+    else
+        echo "${DIM}N/A${NC}"
     fi
 }
 
@@ -1509,11 +1678,18 @@ fetch_peer_logs() {
         return 1
     fi
 
-    # Construire le tableau des fichiers de log
+    # Construire le tableau des fichiers de log et recuperer les tailles
     local -a log_files=()
+    local -a log_sizes=()
+    echo -ne "  ${CYAN}⠋${NC} Chargement des tailles..." >&2
     while IFS= read -r log_file; do
         log_files+=("$log_file")
+        # Recuperer la taille via HEAD request
+        local size
+        size=$(curl -sI --connect-timeout 2 "http://$peer_ip:8080/$log_file" 2>/dev/null | grep -i "^Content-Length:" | awk '{print $2}' | tr -d '\r\n' || echo "0")
+        log_sizes+=("${size:-0}")
     done <<< "$logs_list"
+    echo -e "\r                                        \r" >&2
 
     # Boucle principale pour la navigation dans les logs
     while true; do
@@ -1525,13 +1701,45 @@ fetch_peer_logs() {
         echo -e "${YELLOW}══════════════════════════════════════════════════════════════════════════════${NC}"
         echo ""
 
+        # Preparer le nom du peer pour le cache
+        local clean_peer_name_display
+        clean_peer_name_display=$(echo "$peer_name" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+
         local index=1
+        local idx=0
         for log_file in "${log_files[@]}"; do
             local log_date
             log_date=$(echo "$log_file" | sed 's/BACNET-//;s/\.log.*//')
-            printf "  ${GREEN}%2d.${NC} %s\n" "$index" "$log_date"
+            local status_indicators=""
+
+            # Afficher la taille
+            local file_size="${log_sizes[$idx]}"
+            local size_display=""
+            if [ "$file_size" -gt 1048576 ] 2>/dev/null; then
+                size_display="${DIM}$(awk "BEGIN {printf \"%.1f\", $file_size/1048576}") MB${NC}"
+            elif [ "$file_size" -gt 1024 ] 2>/dev/null; then
+                size_display="${DIM}$(awk "BEGIN {printf \"%.0f\", $file_size/1024}") KB${NC}"
+            elif [ "$file_size" -gt 0 ] 2>/dev/null; then
+                size_display="${DIM}${file_size} o${NC}"
+            fi
+
+            # Verifier si en cache
+            local log_basename_check="${log_file%.gz}"
+            local cache_file_check="$LOG_CACHE_DIR/${clean_peer_name_display}_${log_basename_check}"
+            if [ -f "$cache_file_check" ] && [ -s "$cache_file_check" ]; then
+                status_indicators+=" ${CYAN}⚡${NC}"
+            fi
+
+            # Indicateur compresse
+            if [[ "$log_file" == *.gz ]]; then
+                status_indicators+=" ${YELLOW}(gz)${NC}"
+            fi
+            printf "  ${GREEN}%2d.${NC} %-12s %b%b\n" "$index" "$log_date" "$size_display" "$status_indicators"
             ((index++))
+            ((idx++))
         done
+        echo ""
+        echo -e "  ${DIM}⚡ = en cache${NC}"
 
         echo ""
         echo -e "  ${CYAN}Fichier (1-${#log_files[@]})${NC} ou ${RED}q${NC} pour quitter"
@@ -1598,7 +1806,7 @@ fetch_peer_logs() {
                 echo ""
                 echo -ne "  ${CYAN}▸${NC} "
                 local cache_choice
-                read -rsn1 cache_choice
+                read -r cache_choice
                 [ -z "$cache_choice" ] && cache_choice="1"
 
                 if [ "$cache_choice" = "1" ]; then
@@ -1615,10 +1823,13 @@ fetch_peer_logs() {
 
         # Telecharger si necessaire
         if [ "$need_download" = true ]; then
+            local download_status=0
             if [[ "$selected_log" == *.gz ]]; then
                 download_with_progress "http://$peer_ip:8080/$selected_log" "$timeout" | gunzip > "$cache_file" 2>/dev/null
+                download_status=${PIPESTATUS[0]}
             else
                 download_with_progress "http://$peer_ip:8080/$selected_log" "$timeout" > "$cache_file"
+                download_status=$?
             fi
 
             if [ ! -s "$cache_file" ]; then
@@ -1774,7 +1985,7 @@ fetch_peer_logs() {
                 echo ""
                 echo -ne "  ${CYAN}▸${NC} "
                 local scope_choice
-                read -rsn1 scope_choice
+                read -r scope_choice
                 [ -z "$scope_choice" ] && scope_choice="1"
 
                 if [ "$scope_choice" = "2" ]; then
@@ -2104,7 +2315,7 @@ peer_context_menu() {
         echo ""
         echo -ne "  ${CYAN}▸${NC} "
         local peer_choice
-        read -rsn1 peer_choice
+        read -r peer_choice
 
         case "$peer_choice" in
             f|F)
@@ -2313,82 +2524,176 @@ favorites_menu() {
 }
 
 main_menu() {
+    local need_full_redraw=true
+    local input_buffer=""
+
     while true; do
-        clear
-        echo ""
-        echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════════════════${NC}"
-        echo -e "${YELLOW}                    EDGE MANAGEMENT - Buildy Edge v${SCRIPT_VERSION}           ${NC}"
-        echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════════════════${NC}"
-        echo ""
+        # Calculer les lignes visibles selon le terminal
+        calculate_visible_rows
 
-        display_local_netbird_status
-        echo ""
+        if [[ "$need_full_redraw" == "true" ]]; then
+            clear
 
-        # Afficher la liste des peers automatiquement
-        fetch_peers
-        display_peers_list
+            # Charger les peers
+            fetch_peers
+            load_filtered_peers
 
-        # Compter les favoris
-        local fav_count
-        fav_count=$(get_favorites_count)
+            # Dessiner l'ecran complet
+            draw_header
+            draw_peers_header
+            draw_peers_list
+            draw_menu
+            echo -ne "  ${CYAN}▸${NC} "
 
-        # Menu rapide
-        echo -e "${CYAN}Actions rapides :${NC}"
-        echo -e "  ${GREEN}[N]${NC}   Ouvrir le menu du peer N"
-        echo -e "  ${GREEN}[N]s${NC}  Connexion SSH directe au peer N"
-        echo -e "  ${GREEN}[N]l${NC}  Voir les logs du peer N"
-        echo -e "  ${GREEN}[N]i${NC}  Infos systeme du peer N"
-        echo ""
-        echo -e "${BLUE}──────────────────────────────────────────────────────────────────────────────${NC}"
-        if [ "$fav_count" -gt 0 ]; then
-            echo -e "  ${YELLOW}f${NC}  Favoris (${fav_count} peers)"
-        else
-            echo -e "  ${YELLOW}f${NC}  Favoris"
+            need_full_redraw=false
         fi
-        echo -e "  ${YELLOW}r${NC}  Rafraichir la liste"
-        echo -e "  ${YELLOW}e${NC}  Exporter en CSV"
-        echo -e "  ${RED}q${NC}  Quitter"
-        echo ""
-        echo -ne "  ${CYAN}▸${NC} "
-        local main_choice
-        main_choice=$(read_menu_input)
 
-        # Traiter les commandes speciales d'abord
-        case "$main_choice" in
+        # Lire une touche
+        local key
+        key=$(read_key)
+
+        case "$key" in
+            # Scroll avec fleches
+            UP)
+                if [[ "$SCROLL_OFFSET" -gt 0 ]]; then
+                    ((SCROLL_OFFSET--))
+                    # Redessiner uniquement la zone peers
+                    tput cup 6 0  # Positionner apres header (ligne 6)
+                    draw_peers_header
+                    draw_peers_list
+                    draw_menu
+                    echo -ne "  ${CYAN}▸${NC} $input_buffer"
+                fi
+                ;;
+            DOWN)
+                local max_offset=$((TOTAL_PEERS - VISIBLE_ROWS))
+                [[ "$max_offset" -lt 0 ]] && max_offset=0
+                if [[ "$SCROLL_OFFSET" -lt "$max_offset" ]]; then
+                    ((SCROLL_OFFSET++))
+                    tput cup 6 0
+                    draw_peers_header
+                    draw_peers_list
+                    draw_menu
+                    echo -ne "  ${CYAN}▸${NC} $input_buffer"
+                fi
+                ;;
+            # Toggle filtre online/tous
+            a|A)
+                if [[ -z "$input_buffer" ]]; then
+                    if [[ "$FILTER_ONLINE_ONLY" == "true" ]]; then
+                        FILTER_ONLINE_ONLY=false
+                    else
+                        FILTER_ONLINE_ONLY=true
+                    fi
+                    SCROLL_OFFSET=0
+                    need_full_redraw=true
+                else
+                    input_buffer+="$key"
+                fi
+                ;;
+            # Recherche
+            /)
+                if [[ -z "$input_buffer" ]]; then
+                    echo -ne "\n  ${MAGENTA}Recherche :${NC} "
+                    read -r search_input
+                    if [[ -n "$search_input" ]]; then
+                        SEARCH_TERM="$search_input"
+                        FILTER_ONLINE_ONLY=false
+                    else
+                        SEARCH_TERM=""
+                    fi
+                    SCROLL_OFFSET=0
+                    need_full_redraw=true
+                fi
+                ;;
+            # Effacer recherche
+            c|C)
+                if [[ -z "$input_buffer" ]]; then
+                    SEARCH_TERM=""
+                    SCROLL_OFFSET=0
+                    need_full_redraw=true
+                else
+                    input_buffer+="$key"
+                fi
+                ;;
             f|F)
-                favorites_menu
+                if [[ -z "$input_buffer" ]]; then
+                    favorites_menu
+                    need_full_redraw=true
+                else
+                    input_buffer+="$key"
+                fi
                 ;;
             r|R)
-                fetch_peers true
-                log_message "${GREEN}Liste rafraichie.${NC}"
-                sleep 1
+                if [[ -z "$input_buffer" ]]; then
+                    fetch_peers true
+                    SCROLL_OFFSET=0
+                    need_full_redraw=true
+                else
+                    input_buffer+="$key"
+                fi
                 ;;
             e|E)
-                export_peers_to_csv
-                attendre_q
+                if [[ -z "$input_buffer" ]]; then
+                    export_peers_to_csv
+                    attendre_q
+                    need_full_redraw=true
+                else
+                    input_buffer+="$key"
+                fi
                 ;;
             q|Q)
-                echo ""
-                log_message "${GREEN}Au revoir !${NC}"
-                exit 0
+                if [[ -z "$input_buffer" ]]; then
+                    echo ""
+                    echo -e "${GREEN}Au revoir !${NC}"
+                    exit 0
+                else
+                    input_buffer+="$key"
+                fi
                 ;;
+            # Entree = valider la commande
             "")
-                # Entree vide = rafraichir l'affichage
+                if [[ -n "$input_buffer" ]]; then
+                    # Parser la commande
+                    local parsed
+                    parsed=$(parse_quick_action "$input_buffer")
+
+                    if [ "$parsed" != "invalid" ]; then
+                        local peer_num action
+                        peer_num="${parsed%%:*}"
+                        action="${parsed##*:}"
+                        execute_peer_action "$peer_num" "$action"
+                    else
+                        echo -e "\n  ${RED}Commande invalide : $input_buffer${NC}"
+                        sleep 0.5
+                    fi
+                    input_buffer=""
+                fi
+                need_full_redraw=true
+                ;;
+            # Backspace
+            $'\x7f'|$'\b')
+                if [[ -n "$input_buffer" ]]; then
+                    input_buffer="${input_buffer%?}"
+                    echo -ne "\b \b"
+                fi
+                ;;
+            # Chiffres et lettres -> buffer
+            [0-9])
+                input_buffer+="$key"
+                echo -n "$key"
+                ;;
+            s|S|l|L|i|I)
+                input_buffer+="$key"
+                echo -n "$key"
+                ;;
+            # ESC = effacer buffer
+            ESC)
+                input_buffer=""
+                need_full_redraw=true
                 ;;
             *)
-                # Essayer de parser comme une action rapide (ex: "2s", "15", "3l")
-                local parsed
-                parsed=$(parse_quick_action "$main_choice")
-
-                if [ "$parsed" != "invalid" ]; then
-                    local peer_num action
-                    peer_num="${parsed%%:*}"
-                    action="${parsed##*:}"
-                    execute_peer_action "$peer_num" "$action"
-                else
-                    log_message "${RED}Commande invalide : $main_choice${NC}"
-                    sleep 1
-                fi
+                # Ignorer autres touches
                 ;;
         esac
     done
