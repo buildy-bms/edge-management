@@ -18,7 +18,7 @@ set -euo pipefail
 # ============================================
 # CONFIGURATION
 # ============================================
-readonly SCRIPT_VERSION="1.5.20"
+readonly SCRIPT_VERSION="1.5.21"
 readonly NETBIRD_API_URL="https://api.netbird.io/api/peers"
 readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/buildy-bms/edge-management/main"
 readonly CACHE_DIR="/tmp/edge-management"
@@ -1172,77 +1172,7 @@ select_ssh_user() {
 }
 
 
-execute_remote_update() {
-    local peer_ip="$1"
-    local username="$2"
-    local peer_name="$3"
-
-    echo ""
-    echo -e "${YELLOW}===============================================================================${NC}"
-    echo -e "${GREEN}Connexion a ${YELLOW}$peer_name${GREEN} ($peer_ip) en tant que ${YELLOW}$username${NC}"
-    echo -e "${YELLOW}===============================================================================${NC}"
-    echo ""
-
-    # Script temporaire pour la connexion SSH interactive
-    # NetBird JWT ne permet pas d'automatiser - chaque connexion requiert une auth
-    local tmp_script="/tmp/.edge_connect.sh"
-
-    # Commande a executer - separee en etapes pour eviter les problemes stdin
-    local update_cmd='cd /media/.edge/edge-scripts 2>/dev/null || cd ~/edge-scripts; git pull; bash update_edge_gateway.sh'
-
-    # Copier la commande dans le presse-papiers macOS
-    echo -n "$update_cmd" | pbcopy
-
-    cat > "$tmp_script" << SCRIPT_BODY
-#!/bin/bash
-clear
-echo '╔═══════════════════════════════════════════════════════════════╗'
-echo '║  CONNEXION SSH - $peer_name'
-echo '╚═══════════════════════════════════════════════════════════════╝'
-echo ''
-echo -e '\033[1;33m┌─────────────────────────────────────────────────────────────────┐\033[0m'
-echo -e '\033[1;33m│  1. Cliquez sur le lien d authentification NetBird             │\033[0m'
-echo -e '\033[1;33m│  2. Une fois connecte, collez avec Cmd+V                       │\033[0m'
-echo -e '\033[1;33m└─────────────────────────────────────────────────────────────────┘\033[0m'
-echo ''
-echo -e '\033[1;32m✓ Commande copiee dans le presse-papiers !\033[0m'
-echo ''
-echo -e '\033[0;90m$update_cmd\033[0m'
-echo ''
-echo '═════════════════════════════════════════════════════════════════'
-echo ''
-echo '> Connexion SSH en cours...'
-echo ''
-
-# Connexion SSH interactive simple
-ssh -t -o StrictHostKeyChecking=accept-new "$username@$peer_ip"
-
-echo ''
-echo '> Session terminee.'
-echo ''
-attendre_q "Appuyez sur 'q' pour fermer..."
-SCRIPT_BODY
-    chmod +x "$tmp_script"
-
-    # Detecter le terminal et ouvrir une nouvelle fenetre
-    log_message "Ouverture d'une nouvelle fenetre pour la connexion SSH..."
-    log_message "${YELLOW}L'authentification NetBird se fera dans cette nouvelle fenetre.${NC}"
-    echo ""
-
-    # Toujours utiliser Terminal.app pour SSH (evite les problemes d'integration Warp)
-    osascript <<'EOF'
-tell application "Terminal"
-    activate
-    do script "bash /tmp/.edge_connect.sh"
-end tell
-EOF
-
-    log_message "${GREEN}Fenetre ouverte.${NC}"
-    log_message "Suivez les instructions dans la nouvelle fenetre."
-    return 0
-}
-
-ssh_connect_with_fallback() {
+show_ssh_commands() {
     local peer_json="$1"
     local peer_ip
     peer_ip=$(echo "$peer_json" | jq -r '.ip')
@@ -1253,39 +1183,37 @@ ssh_connect_with_fallback() {
     local selected_user
     selected_user=$(select_ssh_user "$peer_json")
 
-    echo ""
-    log_message "Connexion a ${CYAN}$peer_name${NC} (${peer_ip}) avec l'utilisateur ${GREEN}$selected_user${NC}..."
-    log_message "${YELLOW}Si une authentification NetBird est demandee, connectez-vous dans le navigateur.${NC}"
-    echo ""
+    # Commandes
+    local ssh_cmd="ssh $selected_user@$peer_ip"
+    local update_cmd='cd /media/.edge/edge-scripts 2>/dev/null || cd ~/edge-scripts; git pull; bash update_edge_gateway.sh'
 
-    # Connexion directe - l'utilisateur verra les prompts d'authentification
-    if execute_remote_update "$peer_ip" "$selected_user" "$peer_name"; then
-        return 0
-    fi
-
-    log_message "${RED}Echec de connexion avec $selected_user${NC}"
-
-    # Fallback : essayer l'autre utilisateur
-    local fallback_user
-    if [ "$selected_user" = "$SSH_USER_DEBIAN_12" ]; then
-        fallback_user="$SSH_USER_DEBIAN_11"
-    else
-        fallback_user="$SSH_USER_DEBIAN_12"
-    fi
+    # Copier la commande SSH dans le presse-papiers
+    echo -n "$ssh_cmd" | pbcopy
 
     echo ""
-    if confirm_action "Essayer avec l'utilisateur $fallback_user ?"; then
-        log_message "Tentative avec ${YELLOW}$fallback_user${NC}..."
+    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}  CONNEXION SSH - ${CYAN}$peer_name${NC}"
+    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${WHITE}1. Ouvrez un nouvel onglet et collez cette commande (deja copiee) :${NC}"
+    echo ""
+    echo -e "   ${GREEN}$ssh_cmd${NC}"
+    echo ""
+    echo -e "${WHITE}2. Une fois connecte, executez :${NC}"
+    echo ""
+    echo -e "   ${CYAN}$update_cmd${NC}"
+    echo ""
+    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}✓ Commande SSH copiee dans le presse-papiers !${NC}"
+    echo ""
 
-        if execute_remote_update "$peer_ip" "$fallback_user" "$peer_name"; then
-            return 0
-        fi
+    read -rp "Appuyez sur Entree pour continuer..."
+    return 0
+}
 
-        log_message "${RED}Echec avec $fallback_user egalement.${NC}"
-    fi
-
-    log_message "${RED}Impossible de se connecter a $peer_name${NC}"
-    return 1
+# Alias pour compatibilite
+ssh_connect_with_fallback() {
+    show_ssh_commands "$1"
 }
 
 # ============================================
