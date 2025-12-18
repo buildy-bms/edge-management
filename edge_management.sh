@@ -18,7 +18,7 @@ set -euo pipefail
 # ============================================
 # CONFIGURATION
 # ============================================
-readonly SCRIPT_VERSION="1.5.17"
+readonly SCRIPT_VERSION="1.5.18"
 readonly NETBIRD_API_URL="https://api.netbird.io/api/peers"
 readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/buildy-bms/edge-management/main"
 readonly CACHE_DIR="/tmp/edge-management"
@@ -198,46 +198,12 @@ attendre_q() {
     done
 }
 
-# Lecture intelligente pour menus - pas besoin d'Entree
-# Gere: lettres simples, chiffres 1-9, chiffres 10-99, combinaisons comme "12s"
+# Lecture simple pour menus - validation avec Entree
 # Usage: result=$(read_menu_input)
 read_menu_input() {
-    local input="" char
-
-    # Lire le premier caractere
-    IFS= read -rsn1 char
-
-    # Si c'est une lettre, retourner directement
-    if [[ "$char" =~ [a-zA-Z] ]]; then
-        echo "$char"
-        return
-    fi
-
-    # Si c'est un chiffre, attendre pour voir si d'autres suivent
-    if [[ "$char" =~ [0-9] ]]; then
-        input="$char"
-
-        # Attendre 1s pour un eventuel 2eme caractere (entier pour compatibilite bash 3.2)
-        if IFS= read -rsn1 -t 1 char 2>/dev/null; then
-            if [[ "$char" =~ [0-9] ]]; then
-                # Deuxieme chiffre
-                input+="$char"
-                # Attendre pour une eventuelle lettre d'action (s, l, i)
-                if IFS= read -rsn1 -t 1 char 2>/dev/null; then
-                    [[ "$char" =~ [a-zA-Z] ]] && input+="$char"
-                fi
-            elif [[ "$char" =~ [a-zA-Z] ]]; then
-                # Lettre d'action apres un seul chiffre
-                input+="$char"
-            fi
-        fi
-
-        echo "$input"
-        return
-    fi
-
-    # Autre caractere (espace, entree, etc.)
-    echo "$char"
+    local input
+    read -r input
+    echo "$input"
 }
 
 # Telecharger un fichier avec indicateur de progression
