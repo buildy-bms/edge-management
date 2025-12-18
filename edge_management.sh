@@ -18,7 +18,7 @@ set -euo pipefail
 # ============================================
 # CONFIGURATION
 # ============================================
-readonly SCRIPT_VERSION="1.5.21"
+readonly SCRIPT_VERSION="1.5.22"
 readonly NETBIRD_API_URL="https://api.netbird.io/api/peers"
 readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/buildy-bms/edge-management/main"
 readonly CACHE_DIR="/tmp/edge-management"
@@ -694,10 +694,13 @@ get_cache_age() {
     fi
 
     local cache_mtime cache_age_sec
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        cache_mtime=$(stat -f%m "$CACHE_FILE" 2>/dev/null) || cache_mtime=""
-    else
+    # Detecter GNU stat vs BSD stat (GNU supporte --version)
+    if stat --version &>/dev/null; then
+        # GNU stat (Linux ou macOS avec coreutils)
         cache_mtime=$(stat -c%Y "$CACHE_FILE" 2>/dev/null) || cache_mtime=""
+    else
+        # BSD stat (macOS natif)
+        cache_mtime=$(stat -f%m "$CACHE_FILE" 2>/dev/null) || cache_mtime=""
     fi
 
     # Si stat a echoue ou retourne vide ou non numerique
