@@ -18,7 +18,7 @@ set -euo pipefail
 # ============================================
 # CONFIGURATION
 # ============================================
-readonly SCRIPT_VERSION="1.6.1"
+readonly SCRIPT_VERSION="1.6.2"
 readonly NETBIRD_API_URL="https://api.netbird.io/api/peers"
 readonly CACHE_DIR="/tmp/edge-management"
 readonly CACHE_FILE="$CACHE_DIR/peers_cache.json"
@@ -1133,6 +1133,15 @@ calculate_visible_rows() {
 # Lire une touche (gere les fleches)
 read_key() {
     local key
+
+    # Verifier si stdin est un terminal
+    if [[ ! -t 0 ]]; then
+        # Pas de TTY, attendre un peu pour eviter boucle infinie
+        sleep 0.5
+        echo ""
+        return
+    fi
+
     IFS= read -rsn1 key
 
     # Detecter sequence d'echappement (fleches)
