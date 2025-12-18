@@ -18,8 +18,9 @@ set -euo pipefail
 # ============================================
 # CONFIGURATION
 # ============================================
-readonly SCRIPT_VERSION="1.5.16"
+readonly SCRIPT_VERSION="1.5.17"
 readonly NETBIRD_API_URL="https://api.netbird.io/api/peers"
+readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/buildy-bms/edge-management/main"
 readonly CACHE_DIR="/tmp/edge-management"
 readonly CACHE_FILE="$CACHE_DIR/peers_cache.json"
 readonly LOG_CACHE_DIR="$CACHE_DIR/logs"
@@ -46,6 +47,81 @@ BLUE=$'\033[0;34m'
 MAGENTA=$'\033[0;35m'
 CYAN=$'\033[0;36m'
 NC=$'\033[0m'
+
+# ============================================
+# AUTO-MISE A JOUR
+# ============================================
+
+check_for_updates() {
+    # Skip si --no-update passe en argument
+    [[ "${1:-}" == "--no-update" ]] && return 0
+
+    # Verifier la connectivite (timeout 2s)
+    if ! curl -s --connect-timeout 2 -o /dev/null "$GITHUB_RAW_URL/edge_management.sh"; then
+        return 0  # Pas de connexion, continuer sans mise a jour
+    fi
+
+    # Recuperer la version distante
+    local remote_version
+    remote_version=$(curl -s --connect-timeout 5 "$GITHUB_RAW_URL/edge_management.sh" 2>/dev/null | grep -E '^readonly SCRIPT_VERSION=' | cut -d'"' -f2)
+
+    if [[ -z "$remote_version" ]]; then
+        return 0  # Impossible de recuperer la version
+    fi
+
+    # Comparer les versions (simple comparaison de chaines)
+    if [[ "$remote_version" != "$SCRIPT_VERSION" ]]; then
+        # Verifier si la version distante est plus recente
+        local local_parts remote_parts
+        IFS='.' read -ra local_parts <<< "$SCRIPT_VERSION"
+        IFS='.' read -ra remote_parts <<< "$remote_version"
+
+        local is_newer=false
+        for i in 0 1 2; do
+            local lp="${local_parts[$i]:-0}"
+            local rp="${remote_parts[$i]:-0}"
+            if [[ "$rp" -gt "$lp" ]]; then
+                is_newer=true
+                break
+            elif [[ "$rp" -lt "$lp" ]]; then
+                break
+            fi
+        done
+
+        if [[ "$is_newer" == "true" ]]; then
+            echo ""
+            echo -e "${YELLOW}══════════════════════════════════════════════════════════════════════════${NC}"
+            echo -e "${YELLOW}  MISE A JOUR DISPONIBLE${NC}"
+            echo -e "${YELLOW}══════════════════════════════════════════════════════════════════════════${NC}"
+            echo -e "  Version actuelle : ${RED}$SCRIPT_VERSION${NC}"
+            echo -e "  Nouvelle version : ${GREEN}$remote_version${NC}"
+            echo ""
+            read -rp "  Mettre a jour maintenant ? (O/n) " update_choice
+
+            if [[ ! "$update_choice" =~ ^[nN]$ ]]; then
+                local script_path
+                script_path=$(realpath "$0")
+
+                echo -e "  ${CYAN}Telechargement...${NC}"
+                if curl -fsSL "$GITHUB_RAW_URL/edge_management.sh" -o "${script_path}.new"; then
+                    chmod +x "${script_path}.new"
+                    mv "${script_path}.new" "$script_path"
+                    echo -e "  ${GREEN}Mise a jour effectuee !${NC}"
+                    echo ""
+                    # Relancer le script avec --no-update pour eviter boucle infinie
+                    exec "$script_path" --no-update
+                else
+                    echo -e "  ${RED}Echec du telechargement${NC}"
+                    rm -f "${script_path}.new"
+                fi
+            fi
+            echo ""
+        fi
+    fi
+}
+
+# Verifier les mises a jour au demarrage
+check_for_updates "$@"
 
 # ============================================
 # CHARGEMENT DU TOKEN API NETBIRD
